@@ -1,0 +1,24 @@
+# credentials and session state
+config.json
+*.session
+*.session-journal
+
+# exports
+tg_audio/
+tests/_out/
+*.part
+
+# python
+__pycache__/
+*.py[cod]
+build/
+dist/
+*.egg-info/
+.venv/
+venv/
+
+# editors / os
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
