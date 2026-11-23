@@ -11,7 +11,7 @@ if not exist config.json (
 )
 
 if "%~1"=="" (
-  set /p CHAT=Channel (@name, t.me link, or -100... id):
+  set /p CHAT=Chat (@name, t.me link, or -100... id):
 ) else (
   set "CHAT=%~1"
 )
@@ -21,6 +21,6 @@ echo Type: any = everything, or a mix like voice,photo,pdf
 set /p KINDS=[voice,audio,photo,pdf,image]:
 if "%KINDS%"=="" set "KINDS=voice,audio,photo,pdf,image"
 
-python tg_media_export.py "%CHAT%" --types "%KINDS%" -o "%~dp0tg_media"
+python telegram_downloader.py "%CHAT%" --types "%KINDS%" -o "%~dp0downloads"
 echo.
 pause

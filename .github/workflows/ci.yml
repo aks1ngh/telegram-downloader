@@ -34,10 +34,10 @@ jobs:
           python -m pip install -r requirements.txt
 
       - name: Byte-compile
-        run: python -m compileall -q tg_media_export.py tests
+        run: python -m compileall -q telegram_downloader.py tests
 
       - name: Offline self-test
-        run: python tg_media_export.py --self-test
+        run: python telegram_downloader.py --self-test
 
       - name: Pipeline test (mock client)
         run: python tests/test_pipeline.py

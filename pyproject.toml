@@ -3,14 +3,14 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "tg-media-export"
-version = "1.2.2"
-description = "Export voice notes, audio, photos, PDFs and files from a Telegram channel, including channels with restricted saving."
+name = "telegram-downloader"
+version = "1.3.0"
+description = "Download any file from private or public Telegram groups and channels: voice notes, audio, photos, PDFs, videos and documents."
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
 authors = [{ name = "Akash Singh" }]
-keywords = ["telegram", "telethon", "export", "audio", "photos", "pdf", "media", "archive", "backup"]
+keywords = ["telegram", "telethon", "downloader", "export", "private-channel", "group", "media", "pdf", "photos", "archive", "backup"]
 classifiers = [
     "Development Status :: 5 - Production/Stable",
     "Environment :: Console",
@@ -29,12 +29,13 @@ classifiers = [
 dependencies = ["telethon>=1.34"]
 
 [project.scripts]
-tg-media-export = "tg_media_export:main"
-tg-audio-export = "tg_media_export:main"
+telegram-downloader = "telegram_downloader:main"
+tg-media-export = "telegram_downloader:main"
+tg-audio-export = "telegram_downloader:main"
 
 [project.urls]
-Homepage = "https://github.com/aks1ngh/tg-media-export"
-Issues = "https://github.com/aks1ngh/tg-media-export/issues"
+Homepage = "https://github.com/aks1ngh/telegram-downloader"
+Issues = "https://github.com/aks1ngh/telegram-downloader/issues"
 
 [tool.setuptools]
-py-modules = ["tg_media_export"]
+py-modules = ["telegram_downloader"]

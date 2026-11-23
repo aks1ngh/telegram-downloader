@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """
-Export media from a Telegram channel you can already read: voice notes, music,
+Download files from a Telegram chat you can already read - private or public
+channels and groups alike: voice notes, music, photos, images, PDFs, videos,
+documents.
 photos, images, PDFs, and optionally video or any other document.
 
 Works even when the channel has "Restrict saving content" (protected content)
@@ -13,22 +15,22 @@ The session is cached in a file, so you only enter the code once.
 Examples
 --------
   # 1. see what is in there, download nothing
-  python tg_media_export.py @somechannel --dry-run
+  python telegram_downloader.py @somechannel --dry-run
 
   # 2. pull voice notes, music, photos and PDFs
-  python tg_media_export.py @somechannel -o "D:\\archive"
+  python telegram_downloader.py @somechannel -o "D:\\archive"
 
   # 3. only the kid's voice notes, newest 300 messages
-  python tg_media_export.py @somechannel --types voice --limit 300
+  python telegram_downloader.py @somechannel --types voice --limit 300
 
   # 4. everything, including video and random documents
-  python tg_media_export.py @somechannel --types any -o out
+  python telegram_downloader.py @somechannel --types any -o out
 
   # 5. private channel with no username and a dead invite link:
   #    list what your account can see, then use the numeric id (or --find)
-  python tg_media_export.py --list-chats
-  python tg_media_export.py -1001234567890 -o out
-  python tg_media_export.py --find "family" -o out
+  python telegram_downloader.py --list-chats
+  python telegram_downloader.py -1001234567890 -o out
+  python telegram_downloader.py --find "family" -o out
 """
 
 from __future__ import annotations
@@ -400,7 +402,7 @@ async def resolve_entity(client, target: str):
             f"Could not resolve chat id {target}.\n"
             f"{hint}"
             "Run this and copy a REAL id from the first column:\n"
-            "  python tg_media_export.py --list-chats\n"
+            "  python telegram_downloader.py --list-chats\n"
             f"(the id in the docs, -1001234567890, is only a sample)\n"
             f"last error: {last}"
         )
@@ -755,7 +757,7 @@ def parse_args(argv=None):
         epilog=__doc__,
     )
     p.add_argument("chats", nargs="*", help="@username, t.me link, or invite link")
-    p.add_argument("-o", "--output", default="tg_media", help="output folder (default: tg_media)")
+    p.add_argument("-o", "--output", default="downloads", help="output folder (default: downloads)")
     p.add_argument(
         "--types",
         default="voice,audio,photo,pdf,image",

@@ -11,7 +11,7 @@ from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-import tg_media_export as app  # noqa: E402
+import telegram_downloader as app  # noqa: E402
 from telethon import types as t  # noqa: E402
 
 WHEN = datetime(2024, 11, 2, 18, 45, 1, tzinfo=timezone.utc)
