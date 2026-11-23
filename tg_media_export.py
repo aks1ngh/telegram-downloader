@@ -258,6 +258,38 @@ def env_creds() -> tuple[int | None, str | None]:
     return api_id, (raw_hash or None)
 
 
+def read_config() -> dict:
+    cfg = Path("config.json")
+    if not cfg.exists():
+        return {}
+    try:
+        data = json.loads(cfg.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _prompt_phone() -> str:
+    print("\nFirst login: which account can read that channel?")
+    return input("Phone in international format (e.g. +919876543210): ").strip()
+
+
+def _prompt_password() -> str:
+    import getpass
+
+    return getpass.getpass("Two-step verification password: ")
+
+
+def login_phone(args):
+    """Phone for the first login: --phone, TG_PHONE, config.json, else a prompt.
+
+    Returns a string or the ``_prompt_phone`` callable; Telethon only calls it
+    when the cached session is not authorised yet.
+    """
+    stored = str(read_config().get("phone") or "").strip()
+    return args.phone or os.environ.get("TG_PHONE") or stored or _prompt_phone
+
+
 async def make_client(args, api_id: int, api_hash: str):
     from telethon import TelegramClient
     from telethon.sessions import StringSession
@@ -276,7 +308,15 @@ async def make_client(args, api_id: int, api_hash: str):
         auto_reconnect=True,
         flood_sleep_threshold=0,  # floods are handled explicitly below
     )
-    await client.start(phone=args.phone or None, password=args.password or None)
+
+    # Callables are only invoked when the cached session is not yet authorised,
+    # so a second run never asks for the phone or password again.
+    phone = login_phone(args)
+    password = args.password or _prompt_password
+    try:
+        await client.start(phone=phone, password=password)
+    except ValueError as e:
+        raise SystemExit(f"Login failed: {e}")
     return client
 
 
@@ -779,6 +819,15 @@ def self_test() -> int:
     assert wants("pdf", "voice,pdf") and not wants("video", "voice,pdf")
     assert wants("doc", "any")
     assert slug("  Papa   Mama  ") == "Papa Mama"
+
+    # login phone resolution must never fall back to None (Telethon raises on it)
+    os.environ["TG_PHONE"] = "+10000000000"
+    try:
+        assert login_phone(SimpleNamespace(phone=None)) == "+10000000000"
+    finally:
+        del os.environ["TG_PHONE"]
+    assert login_phone(SimpleNamespace(phone="+911234567890")) == "+911234567890"
+    assert callable(login_phone(SimpleNamespace(phone=None)))
     assert slug("a/b:c") == "a_b_c"
     assert slug("CON") == "_CON"
     print("self-test ok")

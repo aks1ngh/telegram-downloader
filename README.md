@@ -79,11 +79,14 @@ tg-media-export --help
    ```json
    {
      "api_id": 1234567,
-     "api_hash": "0123456789abcdef0123456789abcdef"
+     "api_hash": "0123456789abcdef0123456789abcdef",
+     "phone": "+919876543210"
    }
    ```
 
-   Environment variables work too: `TG_API_ID`, `TG_API_HASH`.
+   `phone` is optional — leave it out and the tool asks once, then caches the
+   login in a session. Environment variables work too: `TG_API_ID`, `TG_API_HASH`,
+   `TG_PHONE`.
 
 3. First run asks for the login code Telegram sends you (and your 2FA password if
    set). It is cached in `tg_media.session`, so this happens once.
@@ -200,6 +203,7 @@ pass `--recheck` to force a re-download.
 | Symptom | Cause / fix |
 | --- | --- |
 | `Missing api_id / api_hash` | Create the app at <https://my.telegram.org> and fill `config.json`. |
+| `No phone number or bot token provided` | Fixed in 1.2.1; on older copies pass `--phone +91...` |
 | `Could not resolve chat` | Use `--list-chats` and pass the numeric `-100...` id. |
 | `Invite link expired / revoked` | You must already be a member; only a channel admin can re-add you. |
 | Login code never arrives | Telegram shows it in the app under **Settings → Devices**, not by SMS. |
