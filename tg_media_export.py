@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-Export audio / voice notes out of a Telegram channel you can already read.
+Export media from a Telegram channel you can already read: voice notes, music,
+photos, images, PDFs, and optionally video or any other document.
 
 Works even when the channel has "Restrict saving content" (protected content)
 enabled: that flag is enforced by official clients, not by the server, so a
@@ -12,22 +13,22 @@ The session is cached in a file, so you only enter the code once.
 Examples
 --------
   # 1. see what is in there, download nothing
-  python tg_audio_export.py @somechannel --dry-run
+  python tg_media_export.py @somechannel --dry-run
 
-  # 2. pull every voice note and audio file
-  python tg_audio_export.py @somechannel -o "D:\\family-audio"
+  # 2. pull voice notes, music, photos and PDFs
+  python tg_media_export.py @somechannel -o "D:\\archive"
 
-  # 3. only the kid's voice notes, newest 200 messages
-  python tg_audio_export.py https://t.me/somechannel --types voice --limit 200
+  # 3. only the kid's voice notes, newest 300 messages
+  python tg_media_export.py @somechannel --types voice --limit 300
 
-  # 4. private invite link
-  python tg_audio_export.py "https://t.me/+AbCdEfGhIjK" -o out
+  # 4. everything, including video and random documents
+  python tg_media_export.py @somechannel --types any -o out
 
   # 5. private channel with no username and a dead invite link:
   #    list what your account can see, then use the numeric id (or --find)
-  python tg_audio_export.py --list-chats
-  python tg_audio_export.py -1001234567890 -o out
-  python tg_audio_export.py --find "family" -o out
+  python tg_media_export.py --list-chats
+  python tg_media_export.py -1001234567890 -o out
+  python tg_media_export.py --find "family" -o out
 """
 
 from __future__ import annotations
@@ -46,13 +47,16 @@ from pathlib import Path
 from types import SimpleNamespace
 
 API_URL = "https://my.telegram.org"
+
 WIN_RESERVED = {
     "CON", "PRN", "AUX", "NUL",
     *[f"COM{i}" for i in range(1, 10)],
     *[f"LPT{i}" for i in range(1, 10)],
 }
 INVALID_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
-AUDIO_EXT = {
+
+# extension by MIME type, for documents that carry one
+MIME_EXT = {
     "audio/ogg": ".ogg",
     "audio/opus": ".opus",
     "audio/mpeg": ".mp3",
@@ -65,11 +69,32 @@ AUDIO_EXT = {
     "audio/wav": ".wav",
     "audio/x-wav": ".wav",
     "audio/webm": ".webm",
+    "image/jpeg": ".jpg",
+    "image/jpg": ".jpg",
+    "image/png": ".png",
+    "image/webp": ".webp",
+    "image/gif": ".gif",
+    "image/heic": ".heic",
+    "image/bmp": ".bmp",
+    "image/tiff": ".tiff",
+    "image/svg+xml": ".svg",
+    "application/pdf": ".pdf",
+    "video/mp4": ".mp4",
+    "video/quicktime": ".mov",
+    "video/webm": ".webm",
+    "video/x-matroska": ".mkv",
 }
+
+KINDS = ("voice", "audio", "photo", "image", "pdf", "video", "doc")
+
+try:  # telethon is the only dependency; keep the module importable without it
+    from telethon import types as T
+except ImportError:  # pragma: no cover
+    T = None
 
 
 # --------------------------------------------------------------------------- #
-# naming / inspection helpers (pure, no network)
+# naming
 # --------------------------------------------------------------------------- #
 
 def slug(text: str, limit: int = 70) -> str:
@@ -84,81 +109,132 @@ def slug(text: str, limit: int = 70) -> str:
     return text
 
 
-def guess_ext(mime: str | None, name: str | None) -> str:
-    if mime and mime.lower() in AUDIO_EXT:
-        return AUDIO_EXT[mime.lower()]
+def guess_ext(mime: str | None, name: str | None, fallback: str = ".bin") -> str:
+    if mime and mime.lower() in MIME_EXT:
+        return MIME_EXT[mime.lower()]
     if name and "." in name:
         ext = "." + name.rsplit(".", 1)[1].lower()
-        if len(ext) <= 6 and ext[1:].isalnum():
+        if 2 <= len(ext) <= 6 and ext[1:].isalnum():
             return ext
-    return ".bin"
+    return fallback
 
 
-def audio_info(msg) -> dict | None:
-    """Return a description of a message's audio payload, or None."""
+def largest_size(sizes) -> int | None:
+    best = None
+    for s in sizes or []:
+        value = getattr(s, "size", None)
+        if isinstance(value, int) and (best is None or value > best):
+            best = value
+    return best
+
+
+# --------------------------------------------------------------------------- #
+# payload inspection (pure, no network)
+# --------------------------------------------------------------------------- #
+
+def media_info(msg) -> dict | None:
+    """Describe a message's downloadable payload, or None if it has none."""
+    if T is None:
+        return None
     media = getattr(msg, "media", None)
     if media is None:
         return None
 
     doc = getattr(media, "document", None)
+
+    # a plain photo (compressed image) is not a document
+    photo = getattr(media, "photo", None)
+    if doc is None and photo is not None:
+        return {
+            "kind": "photo",
+            "ext": ".jpg",
+            "size": largest_size(getattr(photo, "sizes", None)),
+            "title": None,
+            "performer": None,
+            "duration": None,
+            "file_name": None,
+        }
+
     if doc is None:
-        # some payloads carry the document inside the media wrapper directly
         return None
 
     mime = (getattr(doc, "mime_type", "") or "").lower()
     attrs = list(getattr(doc, "attributes", []) or [])
     by_type = {type(a): a for a in attrs}
 
-    audio = by_type.get(_attr("DocumentAttributeAudio"))
-    fname = by_type.get(_attr("DocumentAttributeFilename"))
-    file_name = getattr(fname, "file_name", None) if fname else None
+    audio = by_type.get(T.DocumentAttributeAudio)
+    video = by_type.get(T.DocumentAttributeVideo)
+    fname_attr = by_type.get(T.DocumentAttributeFilename)
+    file_name = getattr(fname_attr, "file_name", None) if fname_attr else None
+    size = getattr(doc, "size", None)
+
+    base = {
+        "size": size,
+        "title": None,
+        "performer": None,
+        "duration": None,
+        "file_name": file_name,
+    }
 
     if audio is not None:
         kind = "voice" if getattr(audio, "voice", False) else "audio"
         return {
+            **base,
             "kind": kind,
             "title": getattr(audio, "title", None),
             "performer": getattr(audio, "performer", None),
             "duration": getattr(audio, "duration", None),
-            "mime": mime,
-            "size": getattr(doc, "size", None),
-            "file_name": file_name,
-            "ext": guess_ext(mime, file_name),
+            "ext": guess_ext(mime, file_name, ".ogg" if kind == "voice" else ".bin"),
         }
 
     if mime.startswith("audio/"):
+        return {**base, "kind": "audio", "ext": guess_ext(mime, file_name, ".bin")}
+
+    if video is not None or mime.startswith("video/"):
         return {
-            "kind": "audio",
-            "title": None,
-            "performer": None,
-            "duration": None,
-            "mime": mime,
-            "size": getattr(doc, "size", None),
-            "file_name": file_name,
-            "ext": guess_ext(mime, file_name),
+            **base,
+            "kind": "video",
+            "duration": getattr(video, "duration", None) if video else None,
+            "ext": guess_ext(mime, file_name, ".mp4"),
         }
+
+    if mime == "application/pdf" or (file_name or "").lower().endswith(".pdf"):
+        return {**base, "kind": "pdf", "ext": ".pdf"}
+
+    if mime.startswith("image/"):
+        return {**base, "kind": "image", "ext": guess_ext(mime, file_name, ".jpg")}
+
+    return {**base, "kind": "doc", "ext": guess_ext(mime, file_name, ".bin")}
+
+
+def audio_info(msg) -> dict | None:
+    """Backwards-compatible alias: only audio kinds."""
+    info = media_info(msg)
+    if info and info["kind"] in ("voice", "audio"):
+        return info
     return None
-
-
-def _attr(name: str):
-    """Lazy import of a telethon DocumentAttribute subclass."""
-    from telethon import types as t  # local import keeps helpers importable offline
-    return getattr(t, name)
 
 
 def build_name(msg, info: dict) -> str:
     when = getattr(msg, "date", None) or datetime.now(timezone.utc)
     stamp = when.strftime("%Y-%m-%d_%H%M%S")
-    label = info.get("kind") or "audio"
-    if info.get("kind") == "audio":
-        title = slug(info.get("title") or info.get("file_name") or "")
-        performer = slug(info.get("performer") or "")
+    mid = getattr(msg, "id", 0)
+    kind = info.get("kind") or "file"
+
+    if kind in ("voice", "photo", "video"):
+        label = kind
+    elif kind == "audio":
+        title = slug(info.get("title") or "", 60)
+        performer = slug(info.get("performer") or "", 40)
         if title and performer:
             label = f"{performer} - {title}"
-        elif title:
-            label = title
-    stem = f"{stamp}_{getattr(msg, 'id', 0)}_{label}"
-    return slug(stem, limit=150) + info["ext"]
+        else:
+            label = title or (slug(Path(info.get("file_name") or "").stem, 60) or "audio")
+    else:  # pdf, image, doc: prefer the original filename
+        original = info.get("file_name") or ""
+        label = slug(Path(original).stem, 80) or kind
+
+    return slug(f"{stamp}_{mid}_{label}", limit=150) + info["ext"]
 
 
 # --------------------------------------------------------------------------- #
@@ -167,7 +243,7 @@ def build_name(msg, info: dict) -> str:
 
 def env_creds() -> tuple[int | None, str | None]:
     cfg = Path("config.json")
-    data = {}
+    data: dict = {}
     if cfg.exists():
         try:
             data = json.loads(cfg.read_text(encoding="utf-8"))
@@ -186,11 +262,7 @@ async def make_client(args, api_id: int, api_hash: str):
     from telethon import TelegramClient
     from telethon.sessions import StringSession
 
-    if args.session_string:
-        session = StringSession(args.session_string)
-    else:
-        session = args.session_file
-
+    session = StringSession(args.session_string) if args.session_string else args.session_file
     client = TelegramClient(
         session,
         api_id,
@@ -202,7 +274,7 @@ async def make_client(args, api_id: int, api_hash: str):
         retry_delay=3,
         request_retries=8,
         auto_reconnect=True,
-        flood_sleep_threshold=0,  # we handle floods ourselves
+        flood_sleep_threshold=0,  # floods are handled explicitly below
     )
     await client.start(phone=args.phone or None, password=args.password or None)
     return client
@@ -211,9 +283,7 @@ async def make_client(args, api_id: int, api_hash: str):
 INVITE_RE = re.compile(
     r"(?:t(?:elegram)?\.me|telegram\.dog)/(?:joinchat/|\+)([A-Za-z0-9_-]{8,})", re.I
 )
-PRIVATE_LINK_RE = re.compile(
-    r"(?:t(?:elegram)?\.me|telegram\.dog)/c/(\d+)(?:/\d+)?", re.I
-)
+PRIVATE_LINK_RE = re.compile(r"(?:t(?:elegram)?\.me|telegram\.dog)/c/(\d+)(?:/\d+)?", re.I)
 NUMERIC_RE = re.compile(r"^-?\d{5,}$")
 
 
@@ -222,8 +292,7 @@ async def find_by_title(client, needle: str, quiet: bool = False):
     needle = needle.strip().lower()
     hits = []
     async for d in client.iter_dialogs():
-        title = (d.title or "").lower()
-        if needle and needle not in title:
+        if needle and needle not in (d.title or "").lower():
             continue
         hits.append(d)
     if not hits:
@@ -257,7 +326,7 @@ async def resolve_entity(client, target: str):
         except Exception:
             continue
 
-    # a plain name with no @ and no link: try it as a dialog title
+    # a plain name: try it as a dialog title
     if not INVITE_RE.search(target) and not target.startswith(("@", "http", "t.me", "telegram.me")):
         found = await find_by_title(client, target)
         if found is not None:
@@ -269,7 +338,7 @@ async def resolve_entity(client, target: str):
             f"Could not resolve chat: {target!r}\n"
             "Private channel without a usable invite link? Run with --list-chats to see\n"
             "every chat your account is in (id, title, last message date), then pass the id:\n"
-            "  python tg_audio_export.py -1001234567890 --dry-run"
+            "  python tg_media_export.py -1001234567890 --dry-run"
         )
 
     invite = m.group(1)
@@ -277,13 +346,12 @@ async def resolve_entity(client, target: str):
         await client(ImportChatInviteRequest(invite))
         print("   joined via invite link")
     except errors.InviteHashExpiredError:
-        raise SystemExit("Invite link expired / revoked.")
+        raise SystemExit("Invite link expired / revoked. You must already be a member.")
     except errors.UserAlreadyParticipantError:
         pass
     except errors.InviteRequestSentError:
         raise SystemExit("Join request sent - approve it from your phone, then re-run.")
     except Exception:
-        # fall back to metadata-only lookup
         try:
             preview = await client(CheckChatInviteRequest(invite))
             if getattr(preview, "chat", None) is not None:
@@ -304,6 +372,32 @@ async def resolve_entity(client, target: str):
     return chat
 
 
+async def dump_dialogs(client, pattern: str) -> int:
+    """Print every chat the account is in, so a private/dead channel can be found by id."""
+    pattern = (pattern or "").strip().lower()
+    rows = []
+    async for d in client.iter_dialogs():
+        title = d.title or ""
+        if pattern and pattern not in title.lower():
+            continue
+        ent = d.entity
+        uname = getattr(ent, "username", None)
+        rows.append((
+            d.id,
+            "channel" if d.is_channel else ("group" if d.is_group else "user"),
+            f"@{uname}" if uname else "",
+            d.message.date.strftime("%Y-%m-%d") if d.message and d.message.date else "",
+            title,
+        ))
+    rows.sort(key=lambda r: r[3], reverse=True)
+    print(f"{'id':>16}  {'type':<8} {'username':<22} {'last msg':<10} title")
+    print("-" * 78)
+    for r in rows:
+        print(f"{r[0]:>16}  {r[1]:<8} {r[2]:<22} {r[3]:<10} {r[4]}")
+    print(f"\n{len(rows)} chats")
+    return len(rows)
+
+
 # --------------------------------------------------------------------------- #
 # download loop
 # --------------------------------------------------------------------------- #
@@ -320,12 +414,14 @@ def progress_printer(name: str, total: int | None):
         if not tot:
             sys.stdout.write(f"\r   {name[:40]} {received/1048576:6.1f} MB   ")
         else:
-            pct = received * 100 / tot
-            sys.stdout.write(f"\r   {name[:40]} {pct:5.1f}%  {received/1048576:6.1f}/{tot/1048576:.1f} MB")
+            sys.stdout.write(
+                f"\r   {name[:40]} {received*100/tot:5.1f}%  "
+                f"{received/1048576:6.1f}/{tot/1048576:.1f} MB"
+            )
         sys.stdout.flush()
 
     def end():
-        sys.stdout.write("\r" + " " * 90 + "\r")
+        sys.stdout.write("\r" + " " * 92 + "\r")
         sys.stdout.flush()
 
     return cb, end
@@ -406,30 +502,10 @@ async def download_one(client, msg, info: dict, out_dir: Path, args) -> tuple[Pa
     raise RuntimeError(f"download failed: {last_err}")
 
 
-async def dump_dialogs(client, pattern: str) -> int:
-    """Print every chat the account is in, so a private/dead channel can be found by id."""
-    pattern = (pattern or "").strip().lower()
-    rows = []
-    async for d in client.iter_dialogs():
-        title = d.title or ""
-        if pattern and pattern not in title.lower():
-            continue
-        ent = d.entity
-        uname = getattr(ent, "username", None)
-        rows.append((
-            d.id,
-            "channel" if d.is_channel else ("group" if d.is_group else "user"),
-            f"@{uname}" if uname else "",
-            d.message.date.strftime("%Y-%m-%d") if d.message and d.message.date else "",
-            title,
-        ))
-    rows.sort(key=lambda r: r[3], reverse=True)
-    print(f"{'id':>16}  {'type':<8} {'username':<22} {'last msg':<10} title")
-    print("-" * 78)
-    for r in rows:
-        print(f"{r[0]:>16}  {r[1]:<8} {r[2]:<22} {r[3]:<10} {r[4]}")
-    print(f"\n{len(rows)} chats")
-    return len(rows)
+def wants(kind: str, types_arg: str) -> bool:
+    if types_arg.strip().lower() in ("any", "all"):
+        return True
+    return kind in {x.strip().lower() for x in types_arg.split(",") if x.strip()}
 
 
 async def run(args) -> int:
@@ -461,7 +537,7 @@ async def run(args) -> int:
                 pass
 
     client = await make_client(args, int(api_id), api_hash)
-    stats = {"seen": 0, "audio": 0, "saved": 0, "skipped": 0, "failed": 0, "bytes": 0}
+    stats = {"seen": 0, "found": 0, "saved": 0, "skipped": 0, "failed": 0, "bytes": 0}
     rows: list[dict] = []
 
     try:
@@ -493,19 +569,17 @@ async def run(args) -> int:
             async for msg in iter_history(client, entity, args):
                 stats["seen"] += 1
                 if stats["seen"] % 500 == 0:
-                    print(f"   scanned {stats['seen']} messages, {stats['audio']} audio")
+                    print(f"   scanned {stats['seen']} messages, {stats['found']} matches")
 
                 if args.since and msg.date and msg.date < args.since:
                     continue
                 if args.until and msg.date and msg.date > args.until:
                     continue
 
-                info = audio_info(msg)
-                if not info:
+                info = media_info(msg)
+                if not info or not wants(info["kind"], args.types):
                     continue
-                if args.types != "any" and info["kind"] not in args.types.split(","):
-                    continue
-                stats["audio"] += 1
+                stats["found"] += 1
 
                 if args.dry_run:
                     dur = info.get("duration") or 0
@@ -529,6 +603,7 @@ async def run(args) -> int:
                         fh.write(json.dumps({
                             "id": msg.id,
                             "date": msg.date.isoformat() if msg.date else None,
+                            "kind": info["kind"],
                             "error": str(e),
                         }, ensure_ascii=False) + "\n")
                     continue
@@ -553,7 +628,7 @@ async def run(args) -> int:
                 rows.append(row)
                 with manifest.open("a", encoding="utf-8") as fh:
                     fh.write(json.dumps(row, ensure_ascii=False) + "\n")
-                print(f"   saved #{msg.id} -> {path.name}")
+                print(f"   saved #{msg.id} [{info['kind']}] -> {path.name}")
 
                 if args.delay:
                     await asyncio.sleep(args.delay)
@@ -565,7 +640,7 @@ async def run(args) -> int:
     if rows and not args.dry_run:
         write_index(out_dir / "index.csv", manifest)
     print(
-        f"\nscanned={stats['seen']} audio={stats['audio']} saved={stats['saved']} "
+        f"\nscanned={stats['seen']} found={stats['found']} saved={stats['saved']} "
         f"skipped={stats['skipped']} failed={stats['failed']} "
         f"total={stats['bytes']/1048576:.1f} MB"
     )
@@ -601,19 +676,22 @@ def write_index(path: Path, manifest: Path) -> None:
 
 def parse_args(argv=None):
     p = argparse.ArgumentParser(
-        description="Download audio and voice notes from a Telegram channel.",
+        description="Download media (voice, audio, photos, PDFs, files) from a Telegram channel.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=__doc__.split("Examples")[-1],
+        epilog=__doc__,
     )
     p.add_argument("chats", nargs="*", help="@username, t.me link, or invite link")
-    p.add_argument("-o", "--output", default="tg_audio", help="output folder (default: tg_audio)")
-    p.add_argument("--types", default="voice,audio",
-                   help="comma list of voice,audio,any (default: voice,audio)")
+    p.add_argument("-o", "--output", default="tg_media", help="output folder (default: tg_media)")
+    p.add_argument(
+        "--types",
+        default="voice,audio,photo,pdf,image",
+        help=f"comma list of {','.join(KINDS)}, or any (default: voice,audio,photo,pdf,image)",
+    )
     p.add_argument("--limit", type=int, default=None, help="scan at most N newest messages")
     p.add_argument("--min-id", type=int, default=0, help="only messages newer than this id")
     p.add_argument("--max-id", type=int, default=0, help="only messages older than this id")
-    p.add_argument("--since", type=parse_date, default=None, help="YYYY-MM-DD lower bound")
-    p.add_argument("--until", type=parse_date, default=None, help="YYYY-MM-DD upper bound")
+    p.add_argument("--since", type=str, default=None, help="YYYY-MM-DD lower bound")
+    p.add_argument("--until", type=str, default=None, help="YYYY-MM-DD upper bound")
     p.add_argument("--oldest-first", action="store_true", help="walk from oldest message")
     p.add_argument("--delay", type=float, default=1.0, help="seconds between downloads")
     p.add_argument("--wait-time", type=float, default=0.0, help="seconds between history requests")
@@ -623,14 +701,27 @@ def parse_args(argv=None):
     p.add_argument("--password", default=None, help="2FA password (omit to be prompted)")
     p.add_argument("--api-id", default=None, help="override TG_API_ID / config.json")
     p.add_argument("--api-hash", default=None, help="override TG_API_HASH / config.json")
-    p.add_argument("--session-file", default="tg_audio.session", help="session cache file")
+    p.add_argument("--session-file", default="tg_media.session", help="session cache file")
     p.add_argument("--session-string", default=None, help="reuse a StringSession instead")
     p.add_argument("--list-chats", nargs="?", const="", default=None, metavar="FILTER",
                    help="print every chat (id, title, last message) and exit; optional title filter")
     p.add_argument("--find", default=None, metavar="TITLE",
                    help="pick the chat whose title contains this text (for private channels)")
     p.add_argument("--self-test", action="store_true", help="run offline checks and exit")
-    return p.parse_args(argv)
+    args = p.parse_args(argv)
+
+    if args.types.strip().lower() not in ("any", "all"):
+        unknown = [x for x in args.types.split(",") if x.strip() and x.strip().lower() not in KINDS]
+        if unknown:
+            p.error(f"unknown --types value(s): {', '.join(unknown)}; valid: {', '.join(KINDS)}, any")
+    for flag in ("since", "until"):
+        raw = getattr(args, flag)
+        if raw:
+            try:
+                setattr(args, flag, parse_date(raw))
+            except ValueError:
+                p.error(f"--{flag} must be YYYY-MM-DD")
+    return args
 
 
 def parse_date(text: str) -> datetime:
@@ -638,38 +729,61 @@ def parse_date(text: str) -> datetime:
 
 
 def self_test() -> int:
-    from telethon import types as t
-
+    if T is None:
+        print("telethon is not installed", file=sys.stderr)
+        return 2
     when = datetime(2024, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
 
-    voice_doc = t.Document(
-        id=1, access_hash=2, file_reference=b"", date=when, mime_type="audio/ogg",
-        size=1234, dc_id=2, attributes=[t.DocumentAttributeAudio(duration=7, voice=True)],
-    )
-    voice = SimpleNamespace(id=42, date=when, media=t.MessageMediaDocument(document=voice_doc))
-    vi = audio_info(voice)
+    def doc(mime, attrs, size=1234, name=None):
+        attributes = list(attrs)
+        if name:
+            attributes.append(T.DocumentAttributeFilename(file_name=name))
+        return T.Document(
+            id=1, access_hash=2, file_reference=b"", date=when, mime_type=mime,
+            size=size, dc_id=2, attributes=attributes,
+        )
+
+    voice = SimpleNamespace(id=42, date=when, media=T.MessageMediaDocument(
+        document=doc("audio/ogg", [T.DocumentAttributeAudio(duration=7, voice=True)])))
+    vi = media_info(voice)
     assert vi and vi["kind"] == "voice" and vi["ext"] == ".ogg", vi
     assert build_name(voice, vi).endswith("_42_voice.ogg"), build_name(voice, vi)
 
-    song_doc = t.Document(
-        id=3, access_hash=4, file_reference=b"", date=when, mime_type="audio/mpeg",
-        size=999, dc_id=2,
-        attributes=[t.DocumentAttributeAudio(duration=180, title="Papa Song", performer="Kid")],
-    )
-    song = SimpleNamespace(id=7, date=when, media=t.MessageMediaDocument(document=song_doc))
-    si = audio_info(song)
+    song = SimpleNamespace(id=7, date=when, media=T.MessageMediaDocument(
+        document=doc("audio/mpeg", [T.DocumentAttributeAudio(
+            duration=180, title="Papa Song", performer="Kid")])))
+    si = media_info(song)
     assert si and si["kind"] == "audio" and si["ext"] == ".mp3", si
-    name = build_name(song, si)
-    assert "Kid - Papa Song" in name, name
+    assert "Kid - Papa Song" in build_name(song, si), build_name(song, si)
 
-    text = SimpleNamespace(id=9, date=when, media=None)
-    assert audio_info(text) is None
+    pdf = SimpleNamespace(id=8, date=when, media=T.MessageMediaDocument(
+        document=doc("application/pdf", [], size=555, name="report final.pdf")))
+    pi = media_info(pdf)
+    assert pi and pi["kind"] == "pdf" and pi["ext"] == ".pdf", pi
+    assert build_name(pdf, pi).endswith("_8_report final.pdf"), build_name(pdf, pi)
+
+    png = SimpleNamespace(id=9, date=when, media=T.MessageMediaDocument(
+        document=doc("image/png", [], size=777, name="scan.png")))
+    ii = media_info(png)
+    assert ii and ii["kind"] == "image" and ii["ext"] == ".png", ii
+
+    photo = SimpleNamespace(id=10, date=when, media=SimpleNamespace(
+        photo=SimpleNamespace(sizes=[SimpleNamespace(size=120), SimpleNamespace(size=4096)])))
+    ph = media_info(photo)
+    assert ph and ph["kind"] == "photo" and ph["ext"] == ".jpg" and ph["size"] == 4096, ph
+    assert build_name(photo, ph).endswith("_10_photo.jpg"), build_name(photo, ph)
+
+    text = SimpleNamespace(id=11, date=when, media=None)
+    assert media_info(text) is None
+
+    assert wants("pdf", "voice,pdf") and not wants("video", "voice,pdf")
+    assert wants("doc", "any")
     assert slug("  Papa   Mama  ") == "Papa Mama"
     assert slug("a/b:c") == "a_b_c"
     assert slug("CON") == "_CON"
     print("self-test ok")
-    print("  voice ->", build_name(voice, vi))
-    print("  song  ->", name)
+    for m, i in ((voice, vi), (song, si), (pdf, pi), (png, ii), (photo, ph)):
+        print(f"  {i['kind']:<6} -> {build_name(m, i)}")
     return 0
 
 
@@ -680,9 +794,7 @@ def main(argv=None) -> int:
     if not (args.chats or args.find or args.list_chats is not None):
         parse_args(["--help"])
         return 2
-    try:
-        import telethon  # noqa: F401
-    except ImportError:
+    if T is None:
         print("Telethon is not installed: python -m pip install telethon", file=sys.stderr)
         return 2
     if os.name == "nt":

@@ -4,6 +4,7 @@ config.json
 *.session-journal
 
 # exports
+tg_media/
 tg_audio/
 tests/_out/
 *.part

@@ -3,14 +3,14 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "tg-audio-export"
-version = "1.1.0"
-description = "Export voice notes and audio files from a Telegram channel, including channels with restricted saving."
+name = "tg-media-export"
+version = "1.2.0"
+description = "Export voice notes, audio, photos, PDFs and files from a Telegram channel, including channels with restricted saving."
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
 authors = [{ name = "Akash Singh" }]
-keywords = ["telegram", "telethon", "export", "audio", "voice-notes", "archive", "backup"]
+keywords = ["telegram", "telethon", "export", "audio", "photos", "pdf", "media", "archive", "backup"]
 classifiers = [
     "Development Status :: 5 - Production/Stable",
     "Environment :: Console",
@@ -23,16 +23,18 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Topic :: Communications :: Chat",
     "Topic :: Multimedia :: Sound/Audio",
+    "Topic :: Multimedia :: Graphics",
     "Topic :: System :: Archiving :: Backup",
 ]
 dependencies = ["telethon>=1.34"]
 
 [project.scripts]
-tg-audio-export = "tg_audio_export:main"
+tg-media-export = "tg_media_export:main"
+tg-audio-export = "tg_media_export:main"
 
 [project.urls]
-Homepage = "https://github.com/aks1ngh/tg-audio-export"
-Issues = "https://github.com/aks1ngh/tg-audio-export/issues"
+Homepage = "https://github.com/aks1ngh/tg-media-export"
+Issues = "https://github.com/aks1ngh/tg-media-export/issues"
 
 [tool.setuptools]
-py-modules = ["tg_audio_export"]
+py-modules = ["tg_media_export"]

@@ -16,6 +16,11 @@ if "%~1"=="" (
   set "CHAT=%~1"
 )
 
-python tg_audio_export.py "%CHAT%" -o "%~dp0tg_audio" %2 %3 %4 %5
+echo.
+echo Type: any = everything, or a mix like voice,photo,pdf
+set /p KINDS=[voice,audio,photo,pdf,image]:
+if "%KINDS%"=="" set "KINDS=voice,audio,photo,pdf,image"
+
+python tg_media_export.py "%CHAT%" --types "%KINDS%" -o "%~dp0tg_media"
 echo.
 pause

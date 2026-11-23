@@ -1,6 +1,6 @@
 """Offline pipeline test: fake MTProto client, real download loop.
 
-Run:  python tests\test_offline.py
+Run:  python tests\test_pipeline.py
 """
 import asyncio
 import json
@@ -11,43 +11,56 @@ from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-import tg_audio_export as app  # noqa: E402
+import tg_media_export as app  # noqa: E402
 from telethon import types as t  # noqa: E402
 
 WHEN = datetime(2024, 11, 2, 18, 45, 1, tzinfo=timezone.utc)
-PAYLOADS = {  # message id -> bytes written by the fake downloader
+CHAT_ID = -1001234567890
+
+# message id -> bytes written by the fake downloader
+PAYLOADS = {
     11: b"VOICE-ONE" * 100,
     12: b"VOICE-TWO" * 100,
     13: b"SONG" * 100,
+    15: b"%PDF-1.4 report" * 50,
+    16: b"\xff\xd8\xff\xe0photo" * 60,
+    17: b"PK\x03\x04zipped" * 40,
 }
-CHAT_ID = -1001234567890
 
 ORIG_MAKE = app.make_client
 ORIG_RESOLVE = app.resolve_entity
 
 
-def doc(mid, mime, attrs, size):
+def doc(mid, mime, attrs, size, name=None):
+    attributes = list(attrs)
+    if name:
+        attributes.append(t.DocumentAttributeFilename(file_name=name))
     return t.Document(
         id=mid, access_hash=0, file_reference=b"", date=WHEN,
-        mime_type=mime, size=size, dc_id=2, attributes=attrs,
+        mime_type=mime, size=size, dc_id=2, attributes=attributes,
     )
 
 
 def build_messages():
-    voice = lambda mid: SimpleNamespace(
-        id=mid, date=WHEN, chat_id=CHAT_ID,
-        media=t.MessageMediaDocument(document=doc(
-            mid, "audio/ogg", [t.DocumentAttributeAudio(duration=5, voice=True)], len(PAYLOADS[mid]))),
-    )
-    song = SimpleNamespace(
-        id=13, date=WHEN, chat_id=CHAT_ID,
-        media=t.MessageMediaDocument(document=doc(
-            13, "audio/mpeg",
-            [t.DocumentAttributeAudio(duration=200, title="Papa Song", performer="Kid")],
-            len(PAYLOADS[13]))),
+    def audio_doc(mid, mime, attrs, size, name=None):
+        return SimpleNamespace(
+            id=mid, date=WHEN, chat_id=CHAT_ID,
+            media=t.MessageMediaDocument(document=doc(mid, mime, attrs, size, name)),
+        )
+
+    voice = lambda mid: audio_doc(
+        mid, "audio/ogg", [t.DocumentAttributeAudio(duration=5, voice=True)], len(PAYLOADS[mid]))
+    song = audio_doc(13, "audio/mpeg",
+                     [t.DocumentAttributeAudio(duration=200, title="Papa Song", performer="Kid")],
+                     len(PAYLOADS[13]))
+    pdf = audio_doc(15, "application/pdf", [], len(PAYLOADS[15]), "report final.pdf")
+    zip_doc = audio_doc(17, "application/zip", [], len(PAYLOADS[17]), "bundle.zip")
+    photo = SimpleNamespace(
+        id=16, date=WHEN, chat_id=CHAT_ID,
+        media=SimpleNamespace(photo=SimpleNamespace(sizes=[SimpleNamespace(size=len(PAYLOADS[16]))])),
     )
     text = SimpleNamespace(id=14, date=WHEN, chat_id=CHAT_ID, media=None)
-    return [text, song, voice(12), voice(11)]  # newest-first, like Telegram
+    return [text, zip_doc, photo, pdf, song, voice(12), voice(11)]  # newest-first
 
 
 class FakeClient:
@@ -117,69 +130,87 @@ async def _coro(value):
 
 def run_with(client, argv, patch_resolve=True):
     app.make_client = lambda args, api_id, api_hash: _coro(client)
-    if patch_resolve:
-        app.resolve_entity = lambda c, target: _coro(c.entity)
-    else:
-        app.resolve_entity = ORIG_RESOLVE
+    app.resolve_entity = (lambda c, target: _coro(c.entity)) if patch_resolve else ORIG_RESOLVE
     args = app.parse_args([*argv, "--api-id", "1", "--api-hash", "x", "--delay", "0"])
     return asyncio.run(app.run(args))
 
 
-def test_download(tmp: Path):
-    client = FakeClient(build_messages())
-    rc = run_with(client, ["@fake", "-o", str(tmp)])
-    files = sorted(p.name for p in tmp.iterdir() if p.suffix in {".ogg", ".mp3"})
-
-    assert rc == 0, rc
-    assert len(files) == 3, files
-    assert any(f.endswith("_11_voice.ogg") for f in files), files
-    assert any("Kid - Papa Song.mp3" in f for f in files), files
-    assert client.downloads == 3, client.downloads
-
-    manifest = [json.loads(x) for x in (tmp / "manifest.jsonl").read_text().splitlines()]
-    assert len(manifest) == 3, manifest
-    assert (tmp / "index.csv").exists()
-
-    run_with(client, ["@fake", "-o", str(tmp)])
-    assert client.downloads == 3, f"re-downloaded: {client.downloads}"
-    return files
-
-
-def test_list_chats():
-    client = FakeClient(build_messages())
-    rc = run_with(client, ["--list-chats"])
-    assert rc == 0
-
-
-def test_resolve_numeric_id():
-    client = FakeClient(build_messages())
-    entity = asyncio.run(ORIG_RESOLVE(client, "-1001234567890"))
-    assert entity is client.entity
-
-
-def test_resolve_private_link():
-    client = FakeClient(build_messages())
-    entity = asyncio.run(ORIG_RESOLVE(client, "https://t.me/c/1234567890/17"))
-    assert entity is client.entity
-
-
-def main() -> int:
-    tmp = Path("tests/_out")
+def reset(tmp: Path) -> None:
     if tmp.exists():
         for p in tmp.rglob("*"):
             if p.is_file():
                 p.unlink()
     tmp.mkdir(parents=True, exist_ok=True)
 
-    files = test_download(tmp)
+
+def test_audio_photo_pdf(tmp: Path):
+    reset(tmp)
+    client = FakeClient(build_messages())
+    rc = run_with(client, ["@fake", "-o", str(tmp)])
+    files = sorted(p.name for p in tmp.iterdir() if p.suffix not in {".jsonl", ".csv"})
+
+    assert rc == 0, rc
+    assert len(files) == 5, files          # 2 voice + song + pdf + photo, zip skipped by default
+    assert any(f.endswith("_11_voice.ogg") for f in files), files
+    assert any("Kid - Papa Song.mp3" in f for f in files), files
+    assert any(f.endswith("_15_report final.pdf") for f in files), files
+    assert any(f.endswith("_16_photo.jpg") for f in files), files
+    assert not any(f.endswith(".zip") for f in files), files
+    assert client.downloads == 5, client.downloads
+
+    manifest = [json.loads(x) for x in (tmp / "manifest.jsonl").read_text().splitlines()]
+    assert len(manifest) == 5, manifest
+    assert {row["kind"] for row in manifest} == {"voice", "audio", "pdf", "photo"}, manifest
+    assert (tmp / "index.csv").exists()
+
+    run_with(client, ["@fake", "-o", str(tmp)])
+    assert client.downloads == 5, f"re-downloaded: {client.downloads}"
+    return files
+
+
+def test_types_any(tmp: Path):
+    reset(tmp)
+    client = FakeClient(build_messages())
+    run_with(client, ["@fake", "-o", str(tmp), "--types", "any"])
+    names = [p.name for p in tmp.iterdir() if p.suffix == ".zip"]
+    assert names, "zip should be exported with --types any"
+    return names
+
+
+def test_list_chats():
+    client = FakeClient(build_messages())
+    assert run_with(client, ["--list-chats"]) == 0
+
+
+def test_resolution():
+    client = FakeClient(build_messages())
+    assert asyncio.run(ORIG_RESOLVE(client, "-1001234567890")) is client.entity
+    assert asyncio.run(ORIG_RESOLVE(client, "https://t.me/c/1234567890/17")) is client.entity
+    assert asyncio.run(ORIG_RESOLVE(client, "Dead Family Channel")) is client.entity
+
+
+def test_bad_types():
+    try:
+        app.parse_args(["--types", "nonsense", "@x"])
+    except SystemExit as e:
+        assert e.code == 2
+    else:
+        raise AssertionError("invalid --types accepted")
+
+
+def main() -> int:
+    tmp = Path("tests/_out")
+    files = test_audio_photo_pdf(tmp)
+    zips = test_types_any(tmp)
     test_list_chats()
-    test_resolve_numeric_id()
-    test_resolve_private_link()
+    test_resolution()
+    test_bad_types()
     app.make_client, app.resolve_entity = ORIG_MAKE, ORIG_RESOLVE
 
-    print("offline test ok: download, resume skip, --list-chats, id + t.me/c resolution")
+    print("pipeline test ok: audio + photo + pdf, --types any, resume, resolution, validation")
     for f in files:
         print("  ", f)
+    print("  (types=any)", zips[0])
     return 0
 
 
