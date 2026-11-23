@@ -345,6 +345,11 @@ async def find_by_title(client, needle: str, quiet: bool = False):
     return hits[0].entity
 
 
+def _looks_like_network_error(exc: BaseException) -> bool:
+    text = f"{type(exc).__name__}: {exc}".lower()
+    return any(s in text for s in ("winerror", "connection", "timeout", "network", "reset", "10054"))
+
+
 async def resolve_entity(client, target: str):
     """Resolve @name, t.me link, t.me/c/ private link, invite link, or numeric id."""
     from telethon import errors
@@ -360,11 +365,21 @@ async def resolve_entity(client, target: str):
     if NUMERIC_RE.match(target) and not target.startswith("-100"):
         candidates.append(f"-100{target.lstrip('-')}")
 
+    failures: list[str] = []
     for cand in candidates:
-        try:
-            return await client.get_entity(int(cand) if NUMERIC_RE.match(cand) else cand)
-        except Exception:
-            continue
+        for attempt in range(3):
+            try:
+                return await client.get_entity(int(cand) if NUMERIC_RE.match(cand) else cand)
+            except ValueError as e:  # unknown entity: retrying will not help
+                failures.append(str(e))
+                break
+            except Exception as e:  # dropped connection, timeout, ...
+                failures.append(str(e))
+                if attempt < 2 and _looks_like_network_error(e):
+                    print(f"   connection problem, retrying ({attempt + 2}/3)...")
+                    await asyncio.sleep(2 * (attempt + 1))
+                    continue
+                break
 
     # a plain name: try it as a dialog title
     if not INVITE_RE.search(target) and not target.startswith(("@", "http", "t.me", "telegram.me")):
@@ -372,13 +387,32 @@ async def resolve_entity(client, target: str):
         if found is not None:
             return found
 
+    if NUMERIC_RE.match(target):
+        last = failures[-1] if failures else "not found"
+        network = _looks_like_network_error(Exception(last))
+        hint = (
+            "The connection dropped before the lookup finished. Retry; if it keeps\n"
+            "happening your ISP may be interfering with Telegram - try a VPN.\n"
+            if network
+            else "That id is not in this account's chat list.\n"
+        )
+        raise SystemExit(
+            f"Could not resolve chat id {target}.\n"
+            f"{hint}"
+            "Run this and copy a REAL id from the first column:\n"
+            "  python tg_media_export.py --list-chats\n"
+            f"(the id in the docs, -1001234567890, is only a sample)\n"
+            f"last error: {last}"
+        )
+
     m = INVITE_RE.search(target) or INVITE_RE.search(f"https://t.me/{target}")
     if not m:
+        last = failures[-1] if failures else "not found"
         raise SystemExit(
             f"Could not resolve chat: {target!r}\n"
             "Private channel without a usable invite link? Run with --list-chats to see\n"
-            "every chat your account is in (id, title, last message date), then pass the id:\n"
-            "  python tg_media_export.py -1001234567890 --dry-run"
+            "every chat your account is in (id, title, last message date), then pass the id.\n"
+            f"last error: {last}"
         )
 
     invite = m.group(1)

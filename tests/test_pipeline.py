@@ -189,6 +189,34 @@ def test_resolution():
     assert asyncio.run(ORIG_RESOLVE(client, "Dead Family Channel")) is client.entity
 
 
+def test_unknown_id_message():
+    client = FakeClient(build_messages())
+    try:
+        asyncio.run(ORIG_RESOLVE(client, "-1009999999999"))
+    except SystemExit as e:
+        assert "--list-chats" in str(e), e
+        assert "sample" in str(e), e
+    else:
+        raise AssertionError("unknown id resolved")
+
+
+def test_connection_retry():
+    class Flaky(FakeClient):
+        def __init__(self, messages):
+            super().__init__(messages)
+            self.calls = 0
+
+        async def get_entity(self, target):
+            self.calls += 1
+            if self.calls == 1:
+                raise ConnectionResetError("WinError 10054: connection forcibly closed")
+            return await super().get_entity(target)
+
+    flaky = Flaky(build_messages())
+    entity = asyncio.run(ORIG_RESOLVE(flaky, "-1001234567890"))
+    assert entity is flaky.entity and flaky.calls >= 2, flaky.calls
+
+
 def test_bad_types():
     try:
         app.parse_args(["--types", "nonsense", "@x"])
@@ -204,6 +232,8 @@ def main() -> int:
     zips = test_types_any(tmp)
     test_list_chats()
     test_resolution()
+    test_unknown_id_message()
+    test_connection_retry()
     test_bad_types()
     app.make_client, app.resolve_entity = ORIG_MAKE, ORIG_RESOLVE
 

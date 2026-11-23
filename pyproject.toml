@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tg-media-export"
-version = "1.2.1"
+version = "1.2.2"
 description = "Export voice notes, audio, photos, PDFs and files from a Telegram channel, including channels with restricted saving."
 readme = "README.md"
 requires-python = ">=3.9"
